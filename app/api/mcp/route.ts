@@ -38,7 +38,14 @@ const handler = createMcpHandler(
         outputSchema: jsonObject,
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
-      async () => asResult(await cellcast("GET", "/user/token/verify"))
+      async () => {
+        // Cellcast echoes the API key back in data.token. Never pass it to the client.
+        const result = (await cellcast("GET", "/user/token/verify")) as any;
+        if (result?.data && typeof result.data === "object" && "token" in result.data) {
+          result.data = { ...result.data, token: "[redacted]" };
+        }
+        return asResult(result);
+      }
     );
 
     server.registerTool(
