@@ -1,18 +1,12 @@
+import { requireToken } from "../../../lib/mcpAuth";
 import { rebuildProjections } from "../../../lib/store";
 
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
 // Replays the Events log and regenerates the projection tables.
-// Protected by MCP_SECRET (pass ?key=<MCP_SECRET>) when that env var is set.
-function guard(req: Request): Response | null {
-  const secret = process.env.MCP_SECRET;
-  if (!secret) return null;
-  const url = new URL(req.url);
-  const provided = url.searchParams.get("key") || req.headers.get("x-mcp-secret");
-  if (provided !== secret) return new Response("Unauthorized", { status: 401 });
-  return null;
-}
+// Protected by the same token as the MCP endpoint (see lib/mcpAuth.ts).
+const guard = requireToken;
 
 async function run() {
   const summary = await rebuildProjections();
