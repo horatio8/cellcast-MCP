@@ -13,7 +13,7 @@ log to regenerate them from scratch.
 
 | Route | Purpose |
 | --- | --- |
-| `POST /api/mcp` | MCP server. Add as a custom connector in Claude. |
+| `POST /api/mcp` | MCP server (Streamable HTTP). Works with any MCP client that can send a bearer token. |
 | `POST /api/webhook/receive` | Inbound SMS replies (MO) → `sms.received` event. |
 | `POST /api/webhook/status` | Delivery reports (DLR) → `sms.<status>` event. |
 | `POST /api/webhook/optout` | Opt-outs → `sms.optout` event (marks Contact opted out). |
@@ -48,18 +48,42 @@ See `.env.example`. Set these in the Vercel project (Settings → Environment Va
 | `AIRTABLE_INBOUND_TABLE` | no | defaults to `tblx3T7VZr5bPK1wj` |
 | `AIRTABLE_OUTBOUND_TABLE` | no | defaults to `tblIkEXrwXEyWUnEt` |
 | `AIRTABLE_CONTACTS_TABLE` | no | defaults to `tbl4z0286KnRwksIf` |
-| `MCP_SECRET` | recommended | shared secret; pass as `?key=` on the MCP and rebuild URLs |
+| `MCP_TOKEN` | yes (or `MCP_SECRET`) | access token(s), comma separated; clients send `Authorization: Bearer <token>` |
+| `MCP_SECRET` | legacy | original shared secret; still accepted as a bearer token, `x-mcp-secret` header, or `?key=` |
 | `WEBHOOK_USER` / `WEBHOOK_PASS` | optional | Basic Auth for the webhook routes |
 
-## Connect in Claude
+## Connecting clients
 
-Add a custom connector pointing at:
+The endpoint is `https://<your-vercel-domain>/api/mcp`. It speaks Streamable HTTP only and
+serves both the 2026-07-28 MCP protocol and 2025-era clients from the same URL
+(`mcp-handler` 2.x). `GET` and `DELETE` answer 405; there is no SSE transport.
+
+Every request needs a token from `MCP_TOKEN` (or `MCP_SECRET`). If neither is set the
+endpoint rejects all requests. Send it as:
 
 ```
-https://<your-vercel-domain>/api/mcp?key=<MCP_SECRET>
+Authorization: Bearer <token>
 ```
 
-(Omit `?key=...` if `MCP_SECRET` is not set.)
+`MCP_TOKEN` can hold several comma separated tokens, so each client can have its own and
+be revoked on its own.
+
+| Client | How to pass the token |
+| --- | --- |
+| Anthropic API MCP connector | `mcp_servers[].authorization_token` |
+| OpenAI Responses API `mcp` tool | `authorization` |
+| xAI Responses API `mcp` tool | `authorization` |
+| Gemini API / SDK | `headers: { "Authorization": "Bearer <token>" }` |
+| Claude Code | `claude mcp add --transport http cellcast <url> --header "Authorization: Bearer <token>"` |
+| Cursor, VS Code, Gemini CLI, MCP Inspector | `headers` entry `Authorization: Bearer <token>` in the MCP config |
+| Copilot Studio | API key auth, header `Authorization`, value `Bearer <token>` |
+| Claude custom connector | `https://<your-vercel-domain>/api/mcp?key=<MCP_SECRET>` (legacy URL form) |
+
+The `?key=` URL form and the `x-mcp-secret` header exist for connectors created before
+bearer tokens were supported. Prefer the header for anything new: URLs end up in logs.
+
+ChatGPT connectors only accept OAuth or no auth, so they cannot use this server until an
+OAuth authorization server is added.
 
 ## Configure Cellcast webhooks
 
