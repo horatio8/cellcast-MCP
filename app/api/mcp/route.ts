@@ -50,6 +50,36 @@ function redactKeys(data: any): any {
   return data;
 }
 
+// Clients that loaded the tool list before `account` existed cannot send that
+// argument. For them, cellcast_request also accepts the account as an
+// `account` query parameter on the path, or an `account` key in the body.
+// Both are removed before the request goes to Cellcast.
+function pickLegacyAccount(
+  path: string,
+  body: Record<string, unknown> | undefined
+): { path: string; body: Record<string, unknown> | undefined; account?: string } {
+  let account: string | undefined;
+  let outPath = path;
+  const q = path.indexOf("?");
+  if (q !== -1) {
+    const params = new URLSearchParams(path.slice(q + 1));
+    const fromQuery = params.get("account");
+    if (fromQuery) {
+      account = fromQuery;
+      params.delete("account");
+      const rest = params.toString();
+      outPath = path.slice(0, q) + (rest ? `?${rest}` : "");
+    }
+  }
+  let outBody = body;
+  if (body && typeof body.account === "string") {
+    account = account || (body.account as string);
+    const { account: _drop, ...rest } = body;
+    outBody = Object.keys(rest).length ? rest : undefined;
+  }
+  return { path: outPath, body: outBody, account };
+}
+
 // Errors from account lookup come back as a normal tool error, not a crash.
 async function withAccount(fn: () => Promise<unknown>) {
   try {
@@ -204,7 +234,7 @@ const handler = createMcpHandler(
       {
         title: "Raw Cellcast API request",
         description:
-          "Advanced escape hatch: call any Cellcast API endpoint directly (templates, MMS, sent messages, opt-outs, etc.). Can send messages or change account data depending on the method and path. Does not log events.",
+          "Advanced escape hatch: call any Cellcast API endpoint directly (templates, MMS, sent messages, opt-outs, etc.). Can send messages or change account data depending on the method and path. Does not log events. To act as a client sub-account, pass `account`, or add account=<client name> to the path's query string, or put \"account\" in the body.",
         inputSchema: z.object({
           method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]),
           path: z.string().describe("Path after /api/v1, e.g. /apiClient/account"),
@@ -214,7 +244,12 @@ const handler = createMcpHandler(
         outputSchema: jsonObject,
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       },
-      async ({ method, path, body, account }) => withAccount(() => cellcast(method, path, body, account))
+      async ({ method, path, body, account }) => {
+        const picked = pickLegacyAccount(path, body);
+        return withAccount(() =>
+          cellcast(method, picked.path, picked.body, account || picked.account)
+        );
+      }
     );
   },
   {
