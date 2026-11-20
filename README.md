@@ -26,8 +26,27 @@ log to regenerate them from scratch.
 - **Inbound Messages** — projection of inbound replies; linked to a Contact.
 - **Contacts** — projection keyed by phone; first/last seen, inbound/outbound counts, last message, opted-out flag.
 
+## Client sub-accounts
+
+Each client gets its own Cellcast sub-account with its own API key, so its inbox, sends and
+balance stay separate. Every Cellcast tool takes an optional `account` argument naming the
+client (for example `"Defend Sacred Ground"`). Leave it out, or pass `"main"`, for the main
+account. Names ignore case, spaces and punctuation.
+
+The connector finds a client's key in this order:
+
+1. `CELLCAST_ACCOUNTS`, a JSON object of short name to API key, e.g.
+   `{"dsg":"eyJ...","fairmigration":"eyJ..."}`.
+2. The main account's sub-account token list in Cellcast, matched on the token name,
+   sub-account name or company name. A new client works as soon as its sub-account has an
+   active API token in Cellcast, with no redeploy.
+
+`list_accounts` shows every name the connector can use. API keys are never returned to
+the MCP client.
+
 ## MCP tools
 
+- `list_accounts` — the main account plus each client sub-account
 - `verify_token` — check the API key is valid
 - `get_balance` — SMS / MMS credit balance
 - `send_sms` — send to one or more numbers (logs an outbound event per recipient)
@@ -41,7 +60,8 @@ See `.env.example`. Set these in the Vercel project (Settings → Environment Va
 
 | Variable | Required | Notes |
 | --- | --- | --- |
-| `CELLCAST_API_KEY` | yes | Cellcast Bearer token |
+| `CELLCAST_API_KEY` | yes | Cellcast Bearer token for the main account |
+| `CELLCAST_ACCOUNTS` | no | JSON map of client name to that sub-account's API key; see "Client sub-accounts" |
 | `AIRTABLE_TOKEN` | yes | PAT with `data.records:read` + `data.records:write` on the base |
 | `AIRTABLE_BASE_ID` | yes | `apph4yvob8RzInWBO` |
 | `AIRTABLE_EVENTS_TABLE` | no | defaults to `tbljkVscc97CQdyCf` |

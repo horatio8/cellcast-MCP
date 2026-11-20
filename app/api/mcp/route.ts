@@ -1,6 +1,7 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 import { cellcast } from "../../../lib/cellcast";
+import { listAccounts, MAIN_ACCOUNT } from "../../../lib/accounts";
 import { requireToken } from "../../../lib/mcpAuth";
 import { ingestEvent, rebuildProjections } from "../../../lib/store";
 
@@ -25,39 +26,80 @@ function asResult(data: unknown) {
 
 // Responses are passed through from Cellcast, so the shape is an open object.
 const jsonObject = z.looseObject({});
-const noInput = z.object({});
+
+// Every Cellcast tool takes this. Leaving it out uses the main account.
+const account = z
+  .string()
+  .optional()
+  .describe(
+    `Which client's Cellcast account to use, e.g. "Defend Sacred Ground". Omit (or "${MAIN_ACCOUNT}") for the main account. Call list_accounts to see the names.`
+  );
+const accountOnly = z.object({ account });
+
+// Cellcast returns API keys in some responses (token verify, the sub-account
+// token list). Strip them before anything reaches the client.
+function redactKeys(data: any): any {
+  if (Array.isArray(data)) return data.map(redactKeys);
+  if (data && typeof data === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(data)) {
+      out[k] = k === "token" && typeof v === "string" ? "[redacted]" : redactKeys(v);
+    }
+    return out;
+  }
+  return data;
+}
+
+// Errors from account lookup come back as a normal tool error, not a crash.
+async function withAccount(fn: () => Promise<unknown>) {
+  try {
+    return asResult(redactKeys(await fn()));
+  } catch (e) {
+    return {
+      content: [{ type: "text" as const, text: (e as Error).message }],
+      isError: true,
+    };
+  }
+}
 
 const handler = createMcpHandler(
   (server) => {
     server.registerTool(
-      "verify_token",
+      "list_accounts",
       {
-        title: "Verify Cellcast token",
-        description: "Verify that the configured Cellcast API token is valid.",
-        inputSchema: noInput,
+        title: "List client accounts",
+        description:
+          "List the Cellcast accounts this connector can use: the main account plus each client sub-account. Pass a name as `account` to the other tools.",
+        inputSchema: z.object({}),
         outputSchema: jsonObject,
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
-      async () => {
-        // Cellcast echoes the API key back in data.token. Never pass it to the client.
-        const result = (await cellcast("GET", "/user/token/verify")) as any;
-        if (result?.data && typeof result.data === "object" && "token" in result.data) {
-          result.data = { ...result.data, token: "[redacted]" };
-        }
-        return asResult(result);
-      }
+      async () => withAccount(async () => ({ accounts: await listAccounts() }))
+    );
+
+    server.registerTool(
+      "verify_token",
+      {
+        title: "Verify Cellcast token",
+        description: "Verify that the Cellcast API token for an account is valid.",
+        inputSchema: accountOnly,
+        outputSchema: jsonObject,
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      // Cellcast echoes the API key back in data.token; withAccount redacts it.
+      async ({ account }) => withAccount(() => cellcast("GET", "/user/token/verify", undefined, account))
     );
 
     server.registerTool(
       "get_balance",
       {
         title: "Get account balance",
-        description: "Get the Cellcast account's SMS and MMS balance.",
-        inputSchema: noInput,
+        description: "Get the SMS and MMS balance of the main account or a client sub-account.",
+        inputSchema: accountOnly,
         outputSchema: jsonObject,
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
-      async () => asResult(await cellcast("GET", "/apiClient/account"))
+      async ({ account }) => withAccount(() => cellcast("GET", "/apiClient/account", undefined, account))
     );
 
     server.registerTool(
@@ -82,16 +124,22 @@ const handler = createMcpHandler(
             .string()
             .optional()
             .describe("Optional UTC schedule time YYYY-MM-DDTHH:mm:ssZ. Blank = send now."),
+          account,
         }),
         outputSchema: jsonObject,
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       },
-      async ({ message, contacts, sender, scheduleAt }) => {
+      async ({ message, contacts, sender, scheduleAt, account }) => {
         const body: Record<string, unknown> = { message, contacts };
         if (sender) body.sender = sender;
         if (scheduleAt) body.scheduleAt = scheduleAt;
 
-        const result = (await cellcast("POST", "/gateway", body)) as any;
+        let result: any;
+        try {
+          result = await cellcast("POST", "/gateway", body, account);
+        } catch (e) {
+          return { content: [{ type: "text" as const, text: (e as Error).message }], isError: true };
+        }
 
         // Log an outbound event per accepted recipient (skip when scheduled in the future).
         const queue = result?.data?.queueResponse;
@@ -108,7 +156,7 @@ const handler = createMcpHandler(
                 to: q?.Number || q?.Contact,
                 body: message,
                 status: "sent",
-                raw: q,
+                raw: account ? { ...q, account } : q,
               });
             } catch (e) {
               warnings.push((e as Error).message);
@@ -116,7 +164,8 @@ const handler = createMcpHandler(
           }
         }
 
-        return asResult(warnings.length ? { ...result, _eventWarnings: warnings } : result);
+        const out = warnings.length ? { ...result, _eventWarnings: warnings } : result;
+        return asResult(redactKeys(out));
       }
     );
 
@@ -124,15 +173,17 @@ const handler = createMcpHandler(
       "get_responses",
       {
         title: "List inbound replies",
-        description: "List inbound SMS responses (replies) from Cellcast, paginated.",
+        description:
+          "List inbound SMS responses (replies) for the main account or a client sub-account, paginated.",
         inputSchema: z.object({
           page: z.number().int().min(1).optional().describe("Page number, default 1."),
+          account,
         }),
         outputSchema: jsonObject,
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
-      async ({ page }) =>
-        asResult(await cellcast("GET", `/apiClient/getResponses?page=${page ?? 1}`))
+      async ({ page, account }) =>
+        withAccount(() => cellcast("GET", `/apiClient/getResponses?page=${page ?? 1}`, undefined, account))
     );
 
     server.registerTool(
@@ -141,7 +192,7 @@ const handler = createMcpHandler(
         title: "Rebuild projections",
         description:
           "Replay the entire Events log to regenerate the Inbound, Outbound, and Contacts tables. Idempotent.",
-        inputSchema: noInput,
+        inputSchema: z.object({}),
         outputSchema: jsonObject,
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
@@ -158,17 +209,18 @@ const handler = createMcpHandler(
           method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]),
           path: z.string().describe("Path after /api/v1, e.g. /apiClient/account"),
           body: z.looseObject({}).optional().describe("Optional JSON body."),
+          account,
         }),
         outputSchema: jsonObject,
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       },
-      async ({ method, path, body }) => asResult(await cellcast(method, path, body))
+      async ({ method, path, body, account }) => withAccount(() => cellcast(method, path, body, account))
     );
   },
   {
     serverInfo: { name: "cellcast", version: "2.0.0" },
     instructions:
-      "Cellcast SMS for an Australian account. send_sms and cellcast_request send real messages and spend credit, so confirm recipients and wording with the user first. Use get_responses to read replies and get_balance to check credit.",
+      "Cellcast SMS for an Australian account with one sub-account per client. Each tool takes an optional `account` naming the client (see list_accounts); leave it out for the main account. send_sms and cellcast_request send real messages and spend credit, so confirm the account, recipients and wording with the user first. Use get_responses to read replies and get_balance to check credit.",
   }
 );
 
